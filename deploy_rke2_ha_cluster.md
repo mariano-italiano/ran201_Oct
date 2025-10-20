@@ -339,3 +339,123 @@ echo "=========================================="
 sleep 10
 /var/lib/rancher/rke2/bin/kubectl get nodes
 ```
+
+
+### Troubleshooting
+
+When using your custom DNS domain please update the cluster coredns configuration as `cluster agent` can have potential issues with communicating to custom DNS i.e. `lab.local`.
+
+```sh
+#!/bin/bash
+
+# CoreDNS Custom DNS Configuration Script for RKE2
+
+set -e
+
+# Configuration - EDIT THESE VALUES
+declare -A DNS_ENTRIES=(
+    ["rancher.lab.local"]="192.168.1.150"
+    ["customdns.lab.local"]="192.168.1.50"
+)
+
+echo "=========================================="
+echo "Updating CoreDNS with Custom DNS Entries"
+echo "=========================================="
+
+# Set kubeconfig
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH=$PATH:/var/lib/rancher/rke2/bin
+
+# Wait for CoreDNS to be ready
+echo "Waiting for CoreDNS to be ready..."
+timeout=120
+elapsed=0
+while [ $elapsed -lt $timeout ]; do
+    if kubectl get deployment -n kube-system rke2-coredns-rke2-coredns &>/dev/null; then
+        echo "CoreDNS is ready!"
+        break
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+    echo "Still waiting... ($elapsed seconds)"
+done
+
+# Create custom hosts content
+CUSTOM_HOSTS=""
+for hostname in "${!DNS_ENTRIES[@]}"; do
+    ip="${DNS_ENTRIES[$hostname]}"
+    CUSTOM_HOSTS="${CUSTOM_HOSTS}    ${ip} ${hostname}\n"
+done
+
+# Create a temporary file with the updated CoreDNS config
+cat > /tmp/coredns-custom.yaml << EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rke2-coredns-rke2-coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+        }
+        hosts /etc/coredns/customhosts {
+$(echo -e "$CUSTOM_HOSTS")
+          fallthrough
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+  customhosts: |
+$(echo -e "$CUSTOM_HOSTS")
+EOF
+
+echo "Applying CoreDNS configuration..."
+kubectl apply -f /tmp/coredns-custom.yaml
+
+# Wait for CoreDNS to reload
+echo "Waiting for CoreDNS to reload configuration..."
+sleep 10
+
+# Restart CoreDNS pods to ensure config is loaded
+echo "Restarting CoreDNS pods..."
+kubectl rollout restart deployment rke2-coredns-rke2-coredns -n kube-system
+kubectl rollout status deployment rke2-coredns-rke2-coredns -n kube-system
+
+echo ""
+echo "=========================================="
+echo "CoreDNS custom DNS configuration complete!"
+echo "=========================================="
+echo "Added DNS entries:"
+for hostname in "${!DNS_ENTRIES[@]}"; do
+    ip="${DNS_ENTRIES[$hostname]}"
+    echo "  ${hostname} -> ${ip}"
+done
+echo ""
+echo "Testing DNS resolution..."
+echo ""
+
+# Test DNS resolution
+for hostname in "${!DNS_ENTRIES[@]}"; do
+    echo "Testing ${hostname}..."
+    kubectl run -it --rm dns-test-$(date +%s) --image=busybox:1.28 --restart=Never -- nslookup ${hostname} || true
+    sleep 2
+done
+
+echo "=========================================="
+echo "You can verify DNS resolution anytime with:"
+echo "  kubectl run -it --rm debug --image=busybox:1.28 --restart=Never -- nslookup your-hostname.example.com"
+echo "=========================================="
+
+# Cleanup
+rm -f /tmp/coredns-custom.yaml
+```
