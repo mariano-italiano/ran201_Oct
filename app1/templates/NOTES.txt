@@ -1,0 +1,4 @@
+
+  Application PYTHON TEST installed successfully !!! 
+
+  You can reach the application on port <node-port>:8080/api
